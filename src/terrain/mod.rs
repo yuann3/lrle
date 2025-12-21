@@ -1,4 +1,8 @@
 pub mod loader;
+pub mod mesh;
+
+pub use loader::load_fdf;
+pub use mesh;
 
 use glam::Vec3;
 
