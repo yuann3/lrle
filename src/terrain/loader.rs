@@ -1,4 +1,5 @@
-use std::{fs, path};
+
+use std::fs;
 use std::path::Path;
 use thiserror::Error;
 
@@ -58,15 +59,16 @@ fn parse_value(s: &str, line: usize) -> Result<(f32, Option<u32>), LoadError> {
     }
 }
 
-// Load terrain data from a .fdf file
+/// Load terrain data from a .fdf file
 pub fn load_fdf<P: AsRef<Path>>(path: P) -> Result<TerrainData, LoadError> {
     let path = path.as_ref();
     let content = fs::read_to_string(path)
         .map_err(|_| LoadError::FileNotFound(path.display().to_string()))?;
+
     parse_fdf_content(&content)
 }
 
-/// Parse .fdf content string
+/// Parse .fdf content string (useful for testing)
 pub fn parse_fdf_content(content: &str) -> Result<TerrainData, LoadError> {
     let mut points: Vec<Vec<f32>> = Vec::new();
     let mut colors: Vec<Vec<u32>> = Vec::new();
@@ -91,9 +93,15 @@ pub fn parse_fdf_content(content: &str) -> Result<TerrainData, LoadError> {
             }
         }
 
+        // Check row width consistency
         if let Some(expected) = expected_width {
-            return Err(LoadError::InconsistentRow {
-                row: line_idx + 1, actual: row_heights.len(), expected });
+            if row_heights.len() != expected {
+                return Err(LoadError::InconsistentRow {
+                    row: line_idx + 1,
+                    actual: row_heights.len(),
+                    expected,
+                });
+            }
         } else {
             expected_width = Some(row_heights.len());
         }
@@ -108,4 +116,57 @@ pub fn parse_fdf_content(content: &str) -> Result<TerrainData, LoadError> {
 
     let colors = if has_any_color { Some(colors) } else { None };
     Ok(TerrainData::new(points, colors))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_simple_fdf() {
+        let content = "0 1 2\n3 4 5";
+        let terrain = parse_fdf_content(content).unwrap();
+
+        assert_eq!(terrain.width, 3);
+        assert_eq!(terrain.height, 2);
+        assert_eq!(terrain.points[0], vec![0.0, 1.0, 2.0]);
+        assert_eq!(terrain.points[1], vec![3.0, 4.0, 5.0]);
+        assert!(terrain.colors.is_none());
+    }
+
+    #[test]
+    fn test_parse_with_colors() {
+        let content = "0,0xFF0000 1,0x00FF00\n2,0x0000FF 3,0xFFFFFF";
+        let terrain = parse_fdf_content(content).unwrap();
+
+        assert!(terrain.colors.is_some());
+        let colors = terrain.colors.unwrap();
+        assert_eq!(colors[0][0], 0xFF0000);
+        assert_eq!(colors[0][1], 0x00FF00);
+    }
+
+    #[test]
+    fn test_parse_inconsistent_rows() {
+        let content = "0 1 2\n3 4";
+        let result = parse_fdf_content(content);
+
+        assert!(matches!(result, Err(LoadError::InconsistentRow { .. })));
+    }
+
+    #[test]
+    fn test_parse_empty_file() {
+        let content = "";
+        let result = parse_fdf_content(content);
+
+        assert!(matches!(result, Err(LoadError::EmptyFile)));
+    }
+
+    #[test]
+    fn test_parse_negative_heights() {
+        let content = "-5 0 5\n-10 0 10";
+        let terrain = parse_fdf_content(content).unwrap();
+
+        assert_eq!(terrain.points[0][0], -5.0);
+        assert_eq!(terrain.points[1][0], -10.0);
+    }
 }
