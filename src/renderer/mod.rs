@@ -1,7 +1,7 @@
 pub mod camera;
 
 use bytemuck;
-use glam::{Mat4, Vec3};
+use glam::Mat4;
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
 use winit::window::Window;
@@ -52,7 +52,7 @@ impl Renderer {
     pub async fn new(window: Arc<Window>) -> anyhow::Result<Self> {
         let size = window.inner_size();
 
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
             ..Default::default()
         });
@@ -103,7 +103,7 @@ impl Renderer {
         // Shader
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Terrain Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../../shaders/terrain.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/terrain.wgsl").into()),
         });
 
         // Uniforms

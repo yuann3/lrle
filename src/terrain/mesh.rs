@@ -1,5 +1,4 @@
 use bytemuck::{Pod, Zeroable};
-use glam::Vec3;
 
 use super::TerrainData;
 
@@ -57,8 +56,8 @@ impl TerrainMesh {
         };
 
         // Center the mesh at origin
-        let offset_x = terrain.width as f32 / 2.0;
-        let offset_z = terrain.height as f32 / 2.0;
+        let offset_x = (terrain.width - 1) as f32 / 2.0;
+        let offset_z = (terrain.height - 1) as f32 / 2.0;
 
         // Generate vertices
         for z in 0..terrain.height {

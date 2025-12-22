@@ -2,8 +2,8 @@ pub mod loader;
 pub mod mesh;
 
 pub use loader::load_fdf;
-
-use glam::Vec3;
+pub use mesh::TerrainMesh;
+pub use mesh::Vertex;
 
 #[derive(Debug, Clone)]
 pub struct TerrainData {
