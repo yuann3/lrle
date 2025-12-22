@@ -1,15 +1,26 @@
+//! GPU rendering pipeline using wgpu.
+//!
+//! This module provides the [`Renderer`] struct which handles:
+//! - wgpu device and surface initialization
+//! - Shader compilation and pipeline setup
+//! - Mesh upload and rendering
+//! - Camera uniform updates
+
 pub mod camera;
 
-use bytemuck;
-use glam::Mat4;
 use std::sync::Arc;
+
+use glam::Mat4;
 use wgpu::util::DeviceExt;
 use winit::window::Window;
 
 use crate::terrain::{TerrainMesh, Vertex};
 use camera::Camera;
 
-/// Uniform data sent to shaders
+/// Uniform data sent to shaders.
+///
+/// Contains the combined view-projection matrix for transforming
+/// vertices from world space to clip space.
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct Uniforms {
@@ -17,12 +28,14 @@ struct Uniforms {
 }
 
 impl Uniforms {
+    /// Create identity uniforms.
     fn new() -> Self {
         Self {
             view_proj: Mat4::IDENTITY.to_cols_array_2d(),
         }
     }
 
+    /// Update with camera's view-projection matrix.
     fn update(&mut self, camera: &Camera, aspect: f32) {
         self.view_proj = camera
             .build_view_projection_matrix(aspect)
@@ -30,35 +43,56 @@ impl Uniforms {
     }
 }
 
+/// GPU renderer managing wgpu state and rendering.
+///
+/// Handles the complete rendering pipeline from mesh upload to frame presentation.
 pub struct Renderer {
+    // Core wgpu objects
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
+
+    /// Current window size (for aspect ratio and resize handling)
     pub size: winit::dpi::PhysicalSize<u32>,
 
+    // Pipeline state
     render_pipeline: wgpu::RenderPipeline,
     vertex_buffer: Option<wgpu::Buffer>,
     index_buffer: Option<wgpu::Buffer>,
     num_indices: u32,
 
+    // Uniforms
     uniform_buffer: wgpu::Buffer,
     uniform_bind_group: wgpu::BindGroup,
 
+    /// Orbital camera for viewing the terrain
     pub camera: Camera,
 }
 
 impl Renderer {
+    /// Create a new renderer for the given window.
+    ///
+    /// # Arguments
+    ///
+    /// * `window` - The window to render to
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if GPU initialization fails.
     pub async fn new(window: Arc<Window>) -> anyhow::Result<Self> {
         let size = window.inner_size();
 
+        // Create wgpu instance
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
             ..Default::default()
         });
 
+        // Create surface for the window
         let surface = instance.create_surface(window)?;
 
+        // Request GPU adapter
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::default(),
@@ -68,6 +102,7 @@ impl Renderer {
             .await
             .ok_or_else(|| anyhow::anyhow!("Failed to find GPU adapter"))?;
 
+        // Create device and queue
         let (device, queue) = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {
@@ -80,6 +115,7 @@ impl Renderer {
             )
             .await?;
 
+        // Configure surface
         let surface_caps = surface.get_capabilities(&adapter);
         let surface_format = surface_caps
             .formats
@@ -100,13 +136,13 @@ impl Renderer {
         };
         surface.configure(&device, &config);
 
-        // Shader
+        // Load and compile shader
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Terrain Shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/terrain.wgsl").into()),
         });
 
-        // Uniforms
+        // Create uniform buffer
         let uniforms = Uniforms::new();
         let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Uniform Buffer"),
@@ -114,6 +150,7 @@ impl Renderer {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
+        // Create bind group layout and bind group
         let uniform_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 entries: &[wgpu::BindGroupLayoutEntry {
@@ -126,7 +163,7 @@ impl Renderer {
                     },
                     count: None,
                 }],
-                label: Some("uniform_bind_group_layout"),
+                label: Some("Uniform Bind Group Layout"),
             });
 
         let uniform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -135,10 +172,10 @@ impl Renderer {
                 binding: 0,
                 resource: uniform_buffer.as_entire_binding(),
             }],
-            label: Some("uniform_bind_group"),
+            label: Some("Uniform Bind Group"),
         });
 
-        // Pipeline
+        // Create render pipeline
         let render_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("Render Pipeline Layout"),
@@ -147,7 +184,7 @@ impl Renderer {
             });
 
         let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Render Pipeline"),
+            label: Some("Wireframe Pipeline"),
             layout: Some(&render_pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
@@ -202,6 +239,9 @@ impl Renderer {
         })
     }
 
+    /// Handle window resize.
+    ///
+    /// Reconfigures the surface for the new size.
     pub fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
         if new_size.width > 0 && new_size.height > 0 {
             self.size = new_size;
@@ -211,6 +251,9 @@ impl Renderer {
         }
     }
 
+    /// Upload terrain mesh to GPU buffers.
+    ///
+    /// Creates vertex and index buffers from the mesh data.
     pub fn upload_mesh(&mut self, mesh: &TerrainMesh) {
         if mesh.vertices.is_empty() {
             self.vertex_buffer = None;
@@ -238,25 +281,34 @@ impl Renderer {
         self.num_indices = mesh.indices.len() as u32;
     }
 
+    /// Render a frame.
+    ///
+    /// Updates camera uniforms and draws the terrain wireframe.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`wgpu::SurfaceError`] if surface acquisition fails.
     pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
         let output = self.surface.get_current_texture()?;
         let view = output
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
-        // Update uniforms
+        // Update camera uniforms
         let aspect = self.size.width as f32 / self.size.height as f32;
         let mut uniforms = Uniforms::new();
         uniforms.update(&self.camera, aspect);
         self.queue
             .write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
 
+        // Create command encoder
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("Render Encoder"),
             });
 
+        // Begin render pass
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Render Pass"),
@@ -278,6 +330,7 @@ impl Renderer {
                 timestamp_writes: None,
             });
 
+            // Draw terrain if buffers exist
             if let (Some(vertex_buffer), Some(index_buffer)) =
                 (&self.vertex_buffer, &self.index_buffer)
             {
@@ -289,6 +342,7 @@ impl Renderer {
             }
         }
 
+        // Submit commands and present
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
 
