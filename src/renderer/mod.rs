@@ -9,12 +9,14 @@
 pub mod camera;
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use glam::Mat4;
 use wgpu::util::DeviceExt;
 use winit::window::Window;
 
 use crate::terrain::{TerrainMesh, Vertex};
+use crate::ui::Ui;
 use camera::Camera;
 
 /// Uniform data sent to shaders.
@@ -68,6 +70,18 @@ pub struct Renderer {
 
     /// Orbital camera for viewing the terrain
     pub camera: Camera,
+
+    // egui
+    egui_state: egui_winit::State,
+    egui_renderer: egui_wgpu::Renderer,
+
+    /// UI state
+    pub ui: Ui,
+
+    /// Frame_time for FPS calculation
+    last_frame: Instant,
+    frame_count: u32,
+    fps: f32,
 }
 
 impl Renderer {
@@ -84,13 +98,13 @@ impl Renderer {
         let size = window.inner_size();
 
         // Create wgpu instance
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
             ..Default::default()
         });
 
         // Create surface for the window
-        let surface = instance.create_surface(window)?;
+        let surface = instance.create_surface(window.clone())?;
 
         // Request GPU adapter
         let adapter = instance
@@ -99,20 +113,18 @@ impl Renderer {
                 compatible_surface: Some(&surface),
                 force_fallback_adapter: false,
             })
-            .await
-            .ok_or_else(|| anyhow::anyhow!("Failed to find GPU adapter"))?;
+            .await?;
 
         // Create device and queue
         let (device, queue) = adapter
-            .request_device(
-                &wgpu::DeviceDescriptor {
-                    required_features: wgpu::Features::empty(),
-                    required_limits: wgpu::Limits::default(),
-                    label: None,
-                    memory_hints: Default::default(),
-                },
-                None,
-            )
+            .request_device(&wgpu::DeviceDescriptor {
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits::default(),
+                label: None,
+                memory_hints: Default::default(),
+                trace: Default::default(),
+                experimental_features: Default::default(),
+            })
             .await?;
 
         // Configure surface
@@ -135,6 +147,19 @@ impl Renderer {
             desired_maximum_frame_latency: 2,
         };
         surface.configure(&device, &config);
+
+        // Init egui
+        let egui_ctx = egui::Context::default();
+        let egui_state = egui_winit::State::new(
+            egui_ctx,
+            egui::ViewportId::ROOT,
+            &window,
+            Some(window.scale_factor() as f32),
+            None,
+            Some(2048),
+        );
+        let egui_renderer = egui_wgpu::Renderer::new(&device, surface_format, egui_wgpu::RendererOptions::default());
+        let ui = Ui::new();
 
         // Load and compile shader
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -236,7 +261,22 @@ impl Renderer {
             uniform_buffer,
             uniform_bind_group,
             camera,
+            egui_state,
+            egui_renderer,
+            ui,
+            last_frame: Instant::now(),
+            frame_count: 0,
+            fps: 0.0,
         })
+    }
+
+    /// Handle window event
+    pub fn handle_window_event(
+        &mut self,
+        window: &Window,
+        event: &winit::event::WindowEvent,
+    ) -> bool {
+        self.egui_state.on_window_event(window, event).consumed
     }
 
     /// Handle window resize.
@@ -288,7 +328,17 @@ impl Renderer {
     /// # Errors
     ///
     /// Returns [`wgpu::SurfaceError`] if surface acquisition fails.
-    pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
+    pub fn render(&mut self, window: &Window) -> Result<(), wgpu::SurfaceError> {
+        // Update FPS counter
+        self.frame_count += 1;
+        let now = Instant::now();
+        let elapsed = now.duration_since(self.last_frame).as_secs_f32();
+        if elapsed >= 1.0 {
+            self.fps = self.frame_count as f32 / elapsed;
+            self.frame_count = 0;
+            self.last_frame = now;
+        }
+
         let output = self.surface.get_current_texture()?;
         let view = output
             .texture
@@ -301,6 +351,32 @@ impl Renderer {
         self.queue
             .write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
 
+        // Begin egui frame
+        let raw_input = self.egui_state.take_egui_input(window);
+        let egui_ctx = self.egui_state.egui_ctx().clone();
+        let full_output = egui_ctx.run(raw_input, |ctx| {
+            let response = self.ui.render(ctx, &mut self.camera, self.fps);
+            if response.reset_camera {
+                self.camera = Camera::new();
+            }
+        });
+
+        // Handle egui platform output (cursor changes, etc.)
+        self.egui_state.handle_platform_output(window, full_output.platform_output);
+
+        // Prepare egui for rendering
+        let paint_jobs = egui_ctx.tessellate(full_output.shapes, full_output.pixels_per_point);
+        let screen_descriptor = egui_wgpu::ScreenDescriptor {
+            size_in_pixels: [self.size.width, self.size.height],
+            pixels_per_point: full_output.pixels_per_point,
+        };
+
+        // Update egui textures
+        for (id, image_delta) in &full_output.textures_delta.set {
+            self.egui_renderer.update_texture(&self.device, &self.queue, *id, image_delta);
+        }
+
+
         // Create command encoder
         let mut encoder = self
             .device
@@ -308,9 +384,19 @@ impl Renderer {
                 label: Some("Render Encoder"),
             });
 
+        // Upload egui buffers
+        self.egui_renderer.update_buffers(
+            &self.device,
+            &self.queue,
+            &mut encoder,
+            &paint_jobs,
+            &screen_descriptor,
+        );
+
+
         // Begin render pass
         {
-            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            let render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Render Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
@@ -324,11 +410,15 @@ impl Renderer {
                         }),
                         store: wgpu::StoreOp::Store,
                     },
+                    depth_slice: None,
                 })],
                 depth_stencil_attachment: None,
                 occlusion_query_set: None,
                 timestamp_writes: None,
             });
+
+            // Convert to 'static lifetime for egui compatibility
+            let mut render_pass = render_pass.forget_lifetime();
 
             // Draw terrain if buffers exist
             if let (Some(vertex_buffer), Some(index_buffer)) =
@@ -340,6 +430,13 @@ impl Renderer {
                 render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 render_pass.draw_indexed(0..self.num_indices, 0, 0..1);
             }
+
+            // Render egui UI
+            self.egui_renderer.render(&mut render_pass, &paint_jobs, &screen_descriptor);
+        }
+
+        for id in &full_output.textures_delta.free {
+            self.egui_renderer.free_texture(id);
         }
 
         // Submit commands and present

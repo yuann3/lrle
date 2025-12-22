@@ -12,6 +12,13 @@
 //! ## Controls
 //!
 //! - `ESC` - Quit application
+//! - Left Drag: Rotate camera
+//! - Scroll: Zoom in/out
+//! - Shift+Drag / Middle Drag: Pan
+//! - R: Reset camera
+//! - Tab: Toggle UI panel
+//! - ESC: Quit
+
 
 mod input;
 mod renderer;
@@ -30,6 +37,7 @@ use winit::{
     window::{Window, WindowId},
 };
 
+use input::InputController;
 use renderer::Renderer;
 use terrain::{load_fdf, TerrainMesh};
 
@@ -54,6 +62,8 @@ struct App {
     renderer: Option<Renderer>,
     /// Pre-generated terrain mesh to upload to GPU
     mesh: TerrainMesh,
+    /// Input controller for camera
+    input: InputController
 }
 
 impl ApplicationHandler for App {
@@ -88,6 +98,15 @@ impl ApplicationHandler for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        // Let egui handle the event first
+        if let Some(ref mut renderer) = self.renderer {
+            if let Some(ref window) = self.window {
+                if renderer.handle_window_event(window, &event) {
+                    return; // egui consumed the event
+                }
+            }
+        }
+
         match event {
             // Close on window close button or ESC key
             WindowEvent::CloseRequested => {
@@ -105,6 +124,44 @@ impl ApplicationHandler for App {
                 event_loop.exit();
             }
 
+            // Handle other keyboard input for camera control
+            WindowEvent::KeyboardInput {
+                event: KeyEvent {
+                    physical_key: PhysicalKey::Code(key),
+                    state,
+                    ..
+                },
+                ..
+            } => {
+                if let Some(ref mut renderer) = self.renderer {
+                    self.input.handle_keyboard(key, state, &mut renderer.camera);
+                }
+            }
+
+            // Mouse button events
+            WindowEvent::MouseInput { button, state, .. } => {
+                self.input.handle_mouse_button(button, state);
+            }
+
+            // Mouse movement
+            WindowEvent::CursorMoved { position, .. } => {
+                if let Some(ref mut renderer) = self.renderer {
+                    self.input.handle_mouse_move(
+                        position.x as f32,
+                        position.y as f32,
+                        &mut renderer.camera,
+                    );
+                }
+            }
+
+            // Mouse scroll for zoom
+            WindowEvent::MouseWheel { delta, .. } => {
+                if let Some(ref mut renderer) = self.renderer {
+                    self.input.handle_scroll(delta, &mut renderer.camera);
+                }
+            }
+
+
             // Handle window resize
             WindowEvent::Resized(physical_size) => {
                 if let Some(ref mut renderer) = self.renderer {
@@ -114,8 +171,8 @@ impl ApplicationHandler for App {
 
             // Render frame
             WindowEvent::RedrawRequested => {
-                if let Some(ref mut renderer) = self.renderer {
-                    match renderer.render() {
+                if let (Some(ref mut renderer), Some(ref window)) = (&mut self.renderer, &self.window) {
+                    match renderer.render(window) {
                         Ok(_) => {}
                         Err(wgpu::SurfaceError::Lost) => {
                             renderer.resize(renderer.size);
@@ -172,6 +229,7 @@ fn main() -> Result<()> {
         window: None,
         renderer: None,
         mesh,
+        input: InputController::new(),
     };
 
     event_loop.run_app(&mut app)?;
