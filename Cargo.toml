@@ -20,6 +20,11 @@ clap = { version = "4", features = ["derive"] }
 anyhow = "1.0"
 thiserror = "1.0"
 
+# UI
+egui = "0.33"
+egui-wgpu = "0.33"
+egui-winit = "0.33"
+
 # Logging
 log = "0.4"
 env_logger = "0.11"

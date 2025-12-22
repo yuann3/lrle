@@ -1,7 +1,6 @@
-//! # lrle - Modern Terrain Visualization Tool
+//! # lrle - A Terrain Visualization Tool
 //!
-//! A GPU-accelerated terrain viewer built with wgpu, supporting .fdf file format
-//! and featuring wireframe rendering with height-based coloring.
+//! A GPU terrain viewer built in wgpu
 //!
 //! ## Usage
 //!
@@ -14,8 +13,10 @@
 //!
 //! - `ESC` - Quit application
 
+mod input;
 mod renderer;
 mod terrain;
+mod ui;
 
 use std::sync::Arc;
 
