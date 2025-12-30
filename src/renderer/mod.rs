@@ -11,7 +11,7 @@ pub mod camera;
 use std::sync::Arc;
 use std::time::Instant;
 
-use glam::Mat4;
+use glam::{Mat4, Vec3};
 use wgpu::util::DeviceExt;
 use winit::window::Window;
 
@@ -19,29 +19,90 @@ use crate::terrain::{TerrainMesh, Vertex};
 use crate::ui::Ui;
 use camera::Camera;
 
-/// Uniform data sent to shaders.
-///
-/// Contains the combined view-projection matrix for transforming
-/// vertices from world space to clip space.
+/// Rendering mode for the terrain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RenderMode {
+    /// Wireframe rendering (lines only)
+    Wireframe,
+    /// Solid shaded rendering with lighting
+    #[default]
+    Solid,
+    /// Both wireframe and solid overlaid
+    Both,
+}
+
+/// Lighting configuration for solid rendering.
+#[derive(Debug, Clone, Copy)]
+pub struct LightingConfig {
+    /// Light direction (normalized, pointing toward light)
+    pub direction: Vec3,
+    /// Light color/intensity
+    pub color: Vec3,
+    /// Ambient light strength (0.0 - 1.0)
+    pub ambient: f32,
+}
+
+impl Default for LightingConfig {
+    fn default() -> Self {
+        Self {
+            // Default: light from upper-right-front
+            direction: Vec3::new(0.5, 0.8, 0.3).normalize(),
+            color: Vec3::ONE,
+            ambient: 0.3,
+        }
+    }
+}
+
+/// Uniform data sent to shaders (wireframe - simple).
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct Uniforms {
+struct WireframeUniforms {
     view_proj: [[f32; 4]; 4],
 }
 
-impl Uniforms {
-    /// Create identity uniforms.
+impl WireframeUniforms {
     fn new() -> Self {
         Self {
             view_proj: Mat4::IDENTITY.to_cols_array_2d(),
         }
     }
 
-    /// Update with camera's view-projection matrix.
     fn update(&mut self, camera: &Camera, aspect: f32) {
         self.view_proj = camera
             .build_view_projection_matrix(aspect)
             .to_cols_array_2d();
+    }
+}
+
+/// Uniform data for solid shaded rendering with lighting.
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct SolidUniforms {
+    view_proj: [[f32; 4]; 4],
+    light_dir: [f32; 3],
+    _pad0: f32,
+    light_color: [f32; 3],
+    ambient: f32,
+}
+
+impl SolidUniforms {
+    fn new() -> Self {
+        Self {
+            view_proj: Mat4::IDENTITY.to_cols_array_2d(),
+            light_dir: [0.5, 0.8, 0.3],
+            _pad0: 0.0,
+            light_color: [1.0, 1.0, 1.0],
+            ambient: 0.3,
+        }
+    }
+
+    fn update(&mut self, camera: &Camera, aspect: f32, lighting: &LightingConfig) {
+        self.view_proj = camera
+            .build_view_projection_matrix(aspect)
+            .to_cols_array_2d();
+        self.light_dir = lighting.direction.to_array();
+        self.light_color = lighting.color.to_array();
+        self.ambient = lighting.ambient;
     }
 }
 
@@ -58,15 +119,32 @@ pub struct Renderer {
     /// Current window size (for aspect ratio and resize handling)
     pub size: winit::dpi::PhysicalSize<u32>,
 
-    // Pipeline state
-    render_pipeline: wgpu::RenderPipeline,
-    vertex_buffer: Option<wgpu::Buffer>,
-    index_buffer: Option<wgpu::Buffer>,
-    num_indices: u32,
+    // Depth buffer
+    depth_texture: wgpu::Texture,
+    depth_view: wgpu::TextureView,
 
-    // Uniforms
-    uniform_buffer: wgpu::Buffer,
-    uniform_bind_group: wgpu::BindGroup,
+    // Wireframe pipeline
+    wireframe_pipeline: wgpu::RenderPipeline,
+    wireframe_uniform_buffer: wgpu::Buffer,
+    wireframe_bind_group: wgpu::BindGroup,
+
+    // Solid pipeline
+    solid_pipeline: wgpu::RenderPipeline,
+    solid_uniform_buffer: wgpu::Buffer,
+    solid_bind_group: wgpu::BindGroup,
+
+    // Mesh buffers
+    vertex_buffer: Option<wgpu::Buffer>,
+    wireframe_index_buffer: Option<wgpu::Buffer>,
+    triangle_index_buffer: Option<wgpu::Buffer>,
+    num_wireframe_indices: u32,
+    num_triangle_indices: u32,
+
+    /// Current render mode
+    pub render_mode: RenderMode,
+
+    /// Lighting configuration
+    pub lighting: LightingConfig,
 
     /// Orbital camera for viewing the terrain
     pub camera: Camera,
@@ -82,6 +160,31 @@ pub struct Renderer {
     last_frame: Instant,
     frame_count: u32,
     fps: f32,
+}
+
+const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+
+fn create_depth_texture(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+) -> (wgpu::Texture, wgpu::TextureView) {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("Depth Texture"),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: DEPTH_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    (texture, view)
 }
 
 impl Renderer {
@@ -158,25 +261,41 @@ impl Renderer {
             None,
             Some(2048),
         );
-        let egui_renderer = egui_wgpu::Renderer::new(&device, surface_format, egui_wgpu::RendererOptions::default());
+        let egui_renderer = egui_wgpu::Renderer::new(
+            &device,
+            surface_format,
+            egui_wgpu::RendererOptions {
+                depth_stencil_format: Some(DEPTH_FORMAT),
+                ..Default::default()
+            },
+        );
         let ui = Ui::new();
 
-        // Load and compile shader
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Terrain Shader"),
+        // Create depth texture
+        let (depth_texture, depth_view) = create_depth_texture(&device, size.width, size.height);
+
+        // Load wireframe shader
+        let wireframe_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Wireframe Shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/terrain.wgsl").into()),
         });
 
-        // Create uniform buffer
-        let uniforms = Uniforms::new();
-        let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Uniform Buffer"),
-            contents: bytemuck::cast_slice(&[uniforms]),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        // Load solid shader
+        let solid_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Solid Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/solid.wgsl").into()),
         });
 
-        // Create bind group layout and bind group
-        let uniform_bind_group_layout =
+        // Create wireframe uniform buffer and bind group
+        let wireframe_uniforms = WireframeUniforms::new();
+        let wireframe_uniform_buffer =
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Wireframe Uniform Buffer"),
+                contents: bytemuck::cast_slice(&[wireframe_uniforms]),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            });
+
+        let wireframe_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 entries: &[wgpu::BindGroupLayoutEntry {
                     binding: 0,
@@ -188,37 +307,69 @@ impl Renderer {
                     },
                     count: None,
                 }],
-                label: Some("Uniform Bind Group Layout"),
+                label: Some("Wireframe Bind Group Layout"),
             });
 
-        let uniform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            layout: &uniform_bind_group_layout,
+        let wireframe_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &wireframe_bind_group_layout,
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
-                resource: uniform_buffer.as_entire_binding(),
+                resource: wireframe_uniform_buffer.as_entire_binding(),
             }],
-            label: Some("Uniform Bind Group"),
+            label: Some("Wireframe Bind Group"),
         });
 
-        // Create render pipeline
-        let render_pipeline_layout =
+        // Create solid uniform buffer and bind group
+        let solid_uniforms = SolidUniforms::new();
+        let solid_uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Solid Uniform Buffer"),
+            contents: bytemuck::cast_slice(&[solid_uniforms]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let solid_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+                label: Some("Solid Bind Group Layout"),
+            });
+
+        let solid_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &solid_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: solid_uniform_buffer.as_entire_binding(),
+            }],
+            label: Some("Solid Bind Group"),
+        });
+
+        // Create wireframe pipeline
+        let wireframe_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("Render Pipeline Layout"),
-                bind_group_layouts: &[&uniform_bind_group_layout],
+                label: Some("Wireframe Pipeline Layout"),
+                bind_group_layouts: &[&wireframe_bind_group_layout],
                 push_constant_ranges: &[],
             });
 
-        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let wireframe_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Wireframe Pipeline"),
-            layout: Some(&render_pipeline_layout),
+            layout: Some(&wireframe_pipeline_layout),
             vertex: wgpu::VertexState {
-                module: &shader,
+                module: &wireframe_shader,
                 entry_point: Some("vs_main"),
                 buffers: &[Vertex::desc()],
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
-                module: &shader,
+                module: &wireframe_shader,
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: config.format,
@@ -236,7 +387,65 @@ impl Renderer {
                 unclipped_depth: false,
                 conservative: false,
             },
-            depth_stencil: None,
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview: None,
+            cache: None,
+        });
+
+        // Create solid pipeline
+        let solid_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Solid Pipeline Layout"),
+                bind_group_layouts: &[&solid_bind_group_layout],
+                push_constant_ranges: &[],
+            });
+
+        let solid_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Solid Pipeline"),
+            layout: Some(&solid_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &solid_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[Vertex::desc()],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &solid_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: Some(wgpu::Face::Back),
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
             multisample: wgpu::MultisampleState {
                 count: 1,
                 mask: !0,
@@ -254,12 +463,21 @@ impl Renderer {
             queue,
             config,
             size,
-            render_pipeline,
+            depth_texture,
+            depth_view,
+            wireframe_pipeline,
+            wireframe_uniform_buffer,
+            wireframe_bind_group,
+            solid_pipeline,
+            solid_uniform_buffer,
+            solid_bind_group,
             vertex_buffer: None,
-            index_buffer: None,
-            num_indices: 0,
-            uniform_buffer,
-            uniform_bind_group,
+            wireframe_index_buffer: None,
+            triangle_index_buffer: None,
+            num_wireframe_indices: 0,
+            num_triangle_indices: 0,
+            render_mode: RenderMode::default(),
+            lighting: LightingConfig::default(),
             camera,
             egui_state,
             egui_renderer,
@@ -281,24 +499,32 @@ impl Renderer {
 
     /// Handle window resize.
     ///
-    /// Reconfigures the surface for the new size.
+    /// Reconfigures the surface and depth buffer for the new size.
     pub fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
         if new_size.width > 0 && new_size.height > 0 {
             self.size = new_size;
             self.config.width = new_size.width;
             self.config.height = new_size.height;
             self.surface.configure(&self.device, &self.config);
+
+            // Recreate depth texture for new size
+            let (depth_texture, depth_view) =
+                create_depth_texture(&self.device, new_size.width, new_size.height);
+            self.depth_texture = depth_texture;
+            self.depth_view = depth_view;
         }
     }
 
     /// Upload terrain mesh to GPU buffers.
     ///
-    /// Creates vertex and index buffers from the mesh data.
+    /// Creates vertex and index buffers for both wireframe and solid rendering.
     pub fn upload_mesh(&mut self, mesh: &TerrainMesh) {
         if mesh.vertices.is_empty() {
             self.vertex_buffer = None;
-            self.index_buffer = None;
-            self.num_indices = 0;
+            self.wireframe_index_buffer = None;
+            self.triangle_index_buffer = None;
+            self.num_wireframe_indices = 0;
+            self.num_triangle_indices = 0;
             return;
         }
 
@@ -310,20 +536,29 @@ impl Renderer {
             },
         ));
 
-        self.index_buffer = Some(self.device.create_buffer_init(
+        self.wireframe_index_buffer = Some(self.device.create_buffer_init(
             &wgpu::util::BufferInitDescriptor {
-                label: Some("Index Buffer"),
+                label: Some("Wireframe Index Buffer"),
                 contents: bytemuck::cast_slice(&mesh.indices),
                 usage: wgpu::BufferUsages::INDEX,
             },
         ));
 
-        self.num_indices = mesh.indices.len() as u32;
+        self.triangle_index_buffer = Some(self.device.create_buffer_init(
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("Triangle Index Buffer"),
+                contents: bytemuck::cast_slice(&mesh.triangle_indices),
+                usage: wgpu::BufferUsages::INDEX,
+            },
+        ));
+
+        self.num_wireframe_indices = mesh.indices.len() as u32;
+        self.num_triangle_indices = mesh.triangle_indices.len() as u32;
     }
 
     /// Render a frame.
     ///
-    /// Updates camera uniforms and draws the terrain wireframe.
+    /// Updates camera uniforms and draws the terrain based on current render mode.
     ///
     /// # Errors
     ///
@@ -344,25 +579,46 @@ impl Renderer {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
-        // Update camera uniforms
+        // Update uniforms
         let aspect = self.size.width as f32 / self.size.height as f32;
-        let mut uniforms = Uniforms::new();
-        uniforms.update(&self.camera, aspect);
-        self.queue
-            .write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
+
+        // Update wireframe uniforms
+        let mut wireframe_uniforms = WireframeUniforms::new();
+        wireframe_uniforms.update(&self.camera, aspect);
+        self.queue.write_buffer(
+            &self.wireframe_uniform_buffer,
+            0,
+            bytemuck::cast_slice(&[wireframe_uniforms]),
+        );
+
+        // Update solid uniforms
+        let mut solid_uniforms = SolidUniforms::new();
+        solid_uniforms.update(&self.camera, aspect, &self.lighting);
+        self.queue.write_buffer(
+            &self.solid_uniform_buffer,
+            0,
+            bytemuck::cast_slice(&[solid_uniforms]),
+        );
 
         // Begin egui frame
         let raw_input = self.egui_state.take_egui_input(window);
         let egui_ctx = self.egui_state.egui_ctx().clone();
         let full_output = egui_ctx.run(raw_input, |ctx| {
-            let response = self.ui.render(ctx, &mut self.camera, self.fps);
+            let response = self.ui.render(
+                ctx,
+                &mut self.camera,
+                &mut self.render_mode,
+                &mut self.lighting,
+                self.fps,
+            );
             if response.reset_camera {
                 self.camera = Camera::new();
             }
         });
 
         // Handle egui platform output (cursor changes, etc.)
-        self.egui_state.handle_platform_output(window, full_output.platform_output);
+        self.egui_state
+            .handle_platform_output(window, full_output.platform_output);
 
         // Prepare egui for rendering
         let paint_jobs = egui_ctx.tessellate(full_output.shapes, full_output.pixels_per_point);
@@ -373,9 +629,9 @@ impl Renderer {
 
         // Update egui textures
         for (id, image_delta) in &full_output.textures_delta.set {
-            self.egui_renderer.update_texture(&self.device, &self.queue, *id, image_delta);
+            self.egui_renderer
+                .update_texture(&self.device, &self.queue, *id, image_delta);
         }
-
 
         // Create command encoder
         let mut encoder = self
@@ -392,7 +648,6 @@ impl Renderer {
             &paint_jobs,
             &screen_descriptor,
         );
-
 
         // Begin render pass
         {
@@ -412,7 +667,14 @@ impl Renderer {
                     },
                     depth_slice: None,
                 })],
-                depth_stencil_attachment: None,
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
                 occlusion_query_set: None,
                 timestamp_writes: None,
             });
@@ -420,19 +682,40 @@ impl Renderer {
             // Convert to 'static lifetime for egui compatibility
             let mut render_pass = render_pass.forget_lifetime();
 
-            // Draw terrain if buffers exist
-            if let (Some(vertex_buffer), Some(index_buffer)) =
-                (&self.vertex_buffer, &self.index_buffer)
-            {
-                render_pass.set_pipeline(&self.render_pipeline);
-                render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+            // Draw terrain based on render mode
+            if let Some(vertex_buffer) = &self.vertex_buffer {
                 render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
-                render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                render_pass.draw_indexed(0..self.num_indices, 0, 0..1);
+
+                // Draw solid first (if applicable)
+                if matches!(self.render_mode, RenderMode::Solid | RenderMode::Both) {
+                    if let Some(triangle_index_buffer) = &self.triangle_index_buffer {
+                        render_pass.set_pipeline(&self.solid_pipeline);
+                        render_pass.set_bind_group(0, &self.solid_bind_group, &[]);
+                        render_pass.set_index_buffer(
+                            triangle_index_buffer.slice(..),
+                            wgpu::IndexFormat::Uint32,
+                        );
+                        render_pass.draw_indexed(0..self.num_triangle_indices, 0, 0..1);
+                    }
+                }
+
+                // Draw wireframe on top (if applicable)
+                if matches!(self.render_mode, RenderMode::Wireframe | RenderMode::Both) {
+                    if let Some(wireframe_index_buffer) = &self.wireframe_index_buffer {
+                        render_pass.set_pipeline(&self.wireframe_pipeline);
+                        render_pass.set_bind_group(0, &self.wireframe_bind_group, &[]);
+                        render_pass.set_index_buffer(
+                            wireframe_index_buffer.slice(..),
+                            wgpu::IndexFormat::Uint32,
+                        );
+                        render_pass.draw_indexed(0..self.num_wireframe_indices, 0, 0..1);
+                    }
+                }
             }
 
             // Render egui UI
-            self.egui_renderer.render(&mut render_pass, &paint_jobs, &screen_descriptor);
+            self.egui_renderer
+                .render(&mut render_pass, &paint_jobs, &screen_descriptor);
         }
 
         for id in &full_output.textures_delta.free {

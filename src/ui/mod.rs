@@ -1,10 +1,11 @@
 //! User interface using egui.
 //!
-//! Provides camera info panel and controls overlay.
+//! Provides camera info panel, render mode selection, and lighting controls.
 
 use egui::Context;
 
 use crate::renderer::camera::Camera;
+use crate::renderer::{LightingConfig, RenderMode};
 
 /// UI state and rendering.
 pub struct Ui {
@@ -19,8 +20,15 @@ impl Ui {
         }
     }
 
-    /// Render the UI and return whether camera was reset.
-    pub fn render(&mut self, ctx: &Context, camera: &mut Camera, fps: f32) -> UiResponse {
+    /// Render the UI and return response actions.
+    pub fn render(
+        &mut self,
+        ctx: &Context,
+        camera: &mut Camera,
+        render_mode: &mut RenderMode,
+        lighting: &mut LightingConfig,
+        fps: f32,
+    ) -> UiResponse {
         let mut response = UiResponse::default();
 
         // Toggle panel with Tab key
@@ -38,6 +46,91 @@ impl Ui {
                     // Performance
                     ui.label(format!("FPS: {:.1}", fps));
                     ui.separator();
+
+                    // Rendering section
+                    ui.collapsing("Rendering", |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label("Mode:");
+                            egui::ComboBox::from_id_salt("render_mode")
+                                .selected_text(match render_mode {
+                                    RenderMode::Wireframe => "Wireframe",
+                                    RenderMode::Solid => "Solid",
+                                    RenderMode::Both => "Both",
+                                })
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(
+                                        render_mode,
+                                        RenderMode::Wireframe,
+                                        "Wireframe",
+                                    );
+                                    ui.selectable_value(render_mode, RenderMode::Solid, "Solid");
+                                    ui.selectable_value(render_mode, RenderMode::Both, "Both");
+                                });
+                        });
+                    });
+
+                    ui.separator();
+
+                    // Lighting section (only shown for solid/both modes)
+                    if matches!(render_mode, RenderMode::Solid | RenderMode::Both) {
+                        ui.collapsing("Lighting", |ui| {
+                            // Light direction as azimuth/elevation
+                            let mut light_azimuth =
+                                lighting.direction.z.atan2(lighting.direction.x).to_degrees();
+                            let mut light_elevation = lighting.direction.y.asin().to_degrees();
+
+                            ui.horizontal(|ui| {
+                                ui.label("Azimuth:");
+                                if ui
+                                    .add(
+                                        egui::DragValue::new(&mut light_azimuth)
+                                            .speed(1.0)
+                                            .suffix("°"),
+                                    )
+                                    .changed()
+                                {
+                                    update_light_direction(
+                                        lighting,
+                                        light_azimuth,
+                                        light_elevation,
+                                    );
+                                }
+                            });
+
+                            ui.horizontal(|ui| {
+                                ui.label("Elevation:");
+                                if ui
+                                    .add(
+                                        egui::DragValue::new(&mut light_elevation)
+                                            .speed(1.0)
+                                            .suffix("°")
+                                            .range(-90.0..=90.0),
+                                    )
+                                    .changed()
+                                {
+                                    update_light_direction(
+                                        lighting,
+                                        light_azimuth,
+                                        light_elevation,
+                                    );
+                                }
+                            });
+
+                            ui.horizontal(|ui| {
+                                ui.label("Ambient:");
+                                ui.add(
+                                    egui::Slider::new(&mut lighting.ambient, 0.0..=1.0)
+                                        .show_value(true),
+                                );
+                            });
+
+                            if ui.button("Reset Lighting").clicked() {
+                                *lighting = LightingConfig::default();
+                            }
+                        });
+
+                        ui.separator();
+                    }
 
                     // Camera section
                     ui.collapsing("Camera", |ui| {
@@ -109,6 +202,17 @@ impl Ui {
 
         response
     }
+}
+
+fn update_light_direction(lighting: &mut LightingConfig, azimuth_deg: f32, elevation_deg: f32) {
+    let azimuth = azimuth_deg.to_radians();
+    let elevation = elevation_deg.to_radians();
+    lighting.direction = glam::Vec3::new(
+        elevation.cos() * azimuth.cos(),
+        elevation.sin(),
+        elevation.cos() * azimuth.sin(),
+    )
+    .normalize();
 }
 
 impl Default for Ui {

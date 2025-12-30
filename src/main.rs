@@ -19,7 +19,6 @@
 //! - Tab: Toggle UI panel
 //! - ESC: Quit
 
-
 mod input;
 mod renderer;
 mod terrain;
@@ -63,7 +62,7 @@ struct App {
     /// Pre-generated terrain mesh to upload to GPU
     mesh: TerrainMesh,
     /// Input controller for camera
-    input: InputController
+    input: InputController,
 }
 
 impl ApplicationHandler for App {
@@ -126,11 +125,12 @@ impl ApplicationHandler for App {
 
             // Handle other keyboard input for camera control
             WindowEvent::KeyboardInput {
-                event: KeyEvent {
-                    physical_key: PhysicalKey::Code(key),
-                    state,
-                    ..
-                },
+                event:
+                    KeyEvent {
+                        physical_key: PhysicalKey::Code(key),
+                        state,
+                        ..
+                    },
                 ..
             } => {
                 if let Some(ref mut renderer) = self.renderer {
@@ -161,7 +161,6 @@ impl ApplicationHandler for App {
                 }
             }
 
-
             // Handle window resize
             WindowEvent::Resized(physical_size) => {
                 if let Some(ref mut renderer) = self.renderer {
@@ -171,7 +170,9 @@ impl ApplicationHandler for App {
 
             // Render frame
             WindowEvent::RedrawRequested => {
-                if let (Some(ref mut renderer), Some(ref window)) = (&mut self.renderer, &self.window) {
+                if let (Some(ref mut renderer), Some(ref window)) =
+                    (&mut self.renderer, &self.window)
+                {
                     match renderer.render(window) {
                         Ok(_) => {}
                         Err(wgpu::SurfaceError::Lost) => {

@@ -4,6 +4,7 @@
 //! for wireframe rendering.
 
 use bytemuck::{Pod, Zeroable};
+use glam::Vec3;
 
 use super::TerrainData;
 
@@ -18,6 +19,8 @@ pub struct Vertex {
     pub position: [f32; 3],
     /// RGB color (normalized 0.0-1.0)
     pub color: [f32; 3],
+    /// Surface normal
+    pub normal: [f32; 3],
 }
 
 impl Vertex {
@@ -43,9 +46,25 @@ impl Vertex {
                     shader_location: 1,
                     format: wgpu::VertexFormat::Float32x3,
                 },
+                // Normal
+                wgpu::VertexAttribute {
+                    offset: (std::mem::size_of::<[f32; 3]>() * 2) as wgpu::BufferAddress,
+                    shader_location: 2,
+                    format: wgpu::VertexFormat::Float32x3,
+                },
             ],
         }
     }
+}
+
+/// Shading mode for normal calculation
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ShadingMode {
+    /// Flat shading - normals from height gradient
+    Flat,
+    /// Smooth shading - normals averaged at vertices
+    #[default]
+    Smooth,
 }
 
 /// Generated mesh ready for GPU upload.
@@ -57,28 +76,46 @@ pub struct TerrainMesh {
     pub vertices: Vec<Vertex>,
     /// Index pairs for line segments (LineList topology)
     pub indices: Vec<u32>,
+    /// Triangle indices for solid rendering (TriangleList)
+    pub triangle_indices: Vec<u32>,
 }
 
 impl TerrainMesh {
-    /// Generate a wireframe mesh from terrain data.
+    /// Generate mesh with default smooth shading.
+    pub fn from_terrain(terrain: &TerrainData, height_scale: f32) -> Self {
+        Self::from_terrain_with_shading(terrain, height_scale, ShadingMode::Smooth)
+    }
+
+    /// Generate mesh from terrain data with specified shading mode.
     ///
     /// # Arguments
     ///
     /// * `terrain` - Source terrain height data
     /// * `height_scale` - Multiplier for height values (Y axis)
+    /// * `shading_mode` - Flat or smooth shading for normals
     ///
     /// # Returns
     ///
     /// A mesh with:
     /// - Vertices positioned in 3D space, centered at origin
     /// - Height-based gradient coloring
+    /// - Surface normals for lighting
     /// - Index pairs for horizontal and vertical wireframe lines
-    pub fn from_terrain(terrain: &TerrainData, height_scale: f32) -> Self {
+    /// - Triangle indices for solid rendering
+    pub fn from_terrain_with_shading(
+        terrain: &TerrainData,
+        height_scale: f32,
+        shading_mode: ShadingMode,
+    ) -> Self {
         let mut vertices = Vec::new();
         let mut indices = Vec::new();
 
         if terrain.width == 0 || terrain.height == 0 {
-            return Self { vertices, indices };
+            return Self {
+                vertices,
+                indices,
+                triangle_indices: Vec::new(),
+            };
         }
 
         let (min_h, max_h) = terrain.height_bounds();
@@ -92,23 +129,33 @@ impl TerrainMesh {
         let offset_x = (terrain.width - 1) as f32 / 2.0;
         let offset_z = (terrain.height - 1) as f32 / 2.0;
 
-        // Generate vertices
+        // first, generate positions and colors
+        let mut positions = Vec::with_capacity(terrain.width * terrain.height);
+        let mut colors = Vec::with_capacity(terrain.width * terrain.height);
+
         for z in 0..terrain.height {
             for x in 0..terrain.width {
                 let h = terrain.points[z][x];
                 let y = h * height_scale;
 
-                let pos = [x as f32 - offset_x, y, z as f32 - offset_z];
+                positions.push(Vec3::new(x as f32 - offset_x, y, z as f32 - offset_z));
 
-                // Color based on normalized height
                 let t = (h - min_h) / height_range;
-                let color = height_to_color(t);
-
-                vertices.push(Vertex {
-                    position: pos,
-                    color,
-                });
+                colors.push(height_to_color(t));
             }
+        }
+
+        let normals = match shading_mode {
+            ShadingMode::Smooth => calculate_smooth_normals(terrain, &positions),
+            ShadingMode::Flat => calculate_flat_normals(terrain, &positions),
+        };
+
+        for i in 0..positions.len() {
+            vertices.push(Vertex {
+                position: positions[i].to_array(),
+                color: colors[i],
+                normal: normals[i].to_array(),
+            });
         }
 
         // Generate indices for wireframe (LineList topology)
@@ -130,8 +177,100 @@ impl TerrainMesh {
             }
         }
 
-        Self { vertices, indices }
+        let mut triangle_indices = Vec::new();
+        for z in 0..terrain.height - 1 {
+            for x in 0..terrain.width - 1 {
+                let top_left = (z * terrain.width + x) as u32;
+                let top_right = top_left + 1;
+                let bottom_left = top_left + terrain.width as u32;
+                let bottom_right = bottom_left + 1;
+
+                triangle_indices.push(top_left);
+                triangle_indices.push(bottom_left);
+                triangle_indices.push(top_right);
+
+                triangle_indices.push(top_right);
+                triangle_indices.push(bottom_left);
+                triangle_indices.push(bottom_right);
+            }
+        }
+
+        Self {
+            vertices,
+            indices,
+            triangle_indices,
+        }
     }
+}
+
+/// Calculate smooth normals by averaging face normals at each vertex
+fn calculate_smooth_normals(terrain: &TerrainData, positions: &[Vec3]) -> Vec<Vec3> {
+    let width = terrain.width;
+    let height = terrain.height;
+    let mut normals = vec![Vec3::ZERO; positions.len()];
+
+    for z in 0..height - 1 {
+        for x in 0..width - 1 {
+            let idx = z * width + x;
+            let tl = positions[idx];
+            let tr = positions[idx + 1];
+            let bl = positions[idx + width];
+            let br = positions[idx + width + 1];
+
+            // first triangle normal
+            let n1 = (bl - tl).cross(tr - tl).normalize_or_zero();
+            // second triangle normal
+            let n2 = (bl - tr).cross(br - tr).normalize_or_zero();
+
+            // add to all vertices of each triange
+            normals[idx] += n1;
+            normals[idx + width] += n1 + n2;
+            normals[idx + 1] += n1 + n2;
+            normals[idx + width + 1] += n2;
+        }
+    }
+
+    for n in &mut normals {
+        *n = n.normalize_or_zero();
+        if n.y < 0.0 {
+            *n = -*n;
+        }
+    }
+
+    normals
+}
+
+/// Calculate flat normals from height gradient at each vertex
+fn calculate_flat_normals(terrain: &TerrainData, positions: &[Vec3]) -> Vec<Vec3> {
+    let width = terrain.width;
+    let height = terrain.height;
+    let mut normals = vec![Vec3::Y; positions.len()];
+
+    for z in 0..height {
+        for x in 0..width {
+            let idx = z * width + x;
+
+            let dx = if x == 0 {
+                positions[idx + 1].y - positions[idx].y
+            } else if x == width - 1 {
+                positions[idx].y - positions[idx - 1].y
+            } else {
+                (positions[idx + 1].y - positions[idx - 1].y) / 2.0
+            };
+
+            let dz = if z == 0 {
+                positions[idx + width].y - positions[idx].y
+            } else if z == height - 1 {
+                positions[idx].y - positions[idx - width].y
+            } else {
+                (positions[idx + width].y - positions[idx - width].y) / 2.0
+            };
+
+            normals[idx] = Vec3::new(-dx, 1.0, -dz).normalize_or_zero();
+        }
+    }
+
+    normals
 }
 
 /// Convert normalized height (0.0-1.0) to terrain gradient color.
