@@ -5,9 +5,11 @@
 //! - [`load_fdf`] - Parser for .fdf terrain files
 //! - [`TerrainMesh`] - GPU-ready mesh generation
 
+pub mod colors;
 pub mod loader;
 pub mod mesh;
 
+pub use colors::ColorScheme;
 pub use loader::load_fdf;
 pub use mesh::{TerrainMesh, Vertex};
 

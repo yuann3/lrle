@@ -15,9 +15,10 @@ use glam::{Mat4, Vec3};
 use wgpu::util::DeviceExt;
 use winit::window::Window;
 
-use crate::terrain::{TerrainMesh, Vertex};
+use crate::terrain::{ColorScheme, TerrainMesh, Vertex};
 use crate::ui::Ui;
 use camera::Camera;
+pub use camera::Projection;
 
 /// Rendering mode for the terrain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -146,6 +147,9 @@ pub struct Renderer {
     /// Lighting configuration
     pub lighting: LightingConfig,
 
+    /// Color scheme for terrain
+    pub color_scheme: ColorScheme,
+
     /// Orbital camera for viewing the terrain
     pub camera: Camera,
 
@@ -160,6 +164,13 @@ pub struct Renderer {
     last_frame: Instant,
     frame_count: u32,
     fps: f32,
+
+    /// Terrain data for mesh regeneration
+    terrain_data: Option<crate::terrain::TerrainData>,
+    /// Height scale for mesh regeneration
+    height_scale: f32,
+    /// Previous color scheme to detect changes
+    prev_color_scheme: ColorScheme,
 }
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
@@ -478,6 +489,7 @@ impl Renderer {
             num_triangle_indices: 0,
             render_mode: RenderMode::default(),
             lighting: LightingConfig::default(),
+            color_scheme: ColorScheme::default(),
             camera,
             egui_state,
             egui_renderer,
@@ -485,6 +497,9 @@ impl Renderer {
             last_frame: Instant::now(),
             frame_count: 0,
             fps: 0.0,
+            terrain_data: None,
+            height_scale: 1.0,
+            prev_color_scheme: ColorScheme::default(),
         })
     }
 
@@ -515,10 +530,34 @@ impl Renderer {
         }
     }
 
+    /// Upload terrain data to GPU.
+    ///
+    /// Stores the terrain data and generates a mesh with the current color scheme.
+    /// The terrain data is retained so the mesh can be regenerated when the color scheme changes.
+    pub fn upload_terrain(&mut self, terrain: &crate::terrain::TerrainData, height_scale: f32) {
+        self.terrain_data = Some(terrain.clone());
+        self.height_scale = height_scale;
+        self.regenerate_mesh();
+    }
+
+    /// Regenerate mesh from stored terrain data with current color scheme.
+    fn regenerate_mesh(&mut self) {
+        if let Some(ref terrain) = self.terrain_data {
+            let mesh = TerrainMesh::from_terrain_with_options(
+                terrain,
+                self.height_scale,
+                crate::terrain::mesh::ShadingMode::Smooth,
+                self.color_scheme,
+            );
+            self.upload_mesh_buffers(&mesh);
+            self.prev_color_scheme = self.color_scheme;
+        }
+    }
+
     /// Upload terrain mesh to GPU buffers.
     ///
     /// Creates vertex and index buffers for both wireframe and solid rendering.
-    pub fn upload_mesh(&mut self, mesh: &TerrainMesh) {
+    fn upload_mesh_buffers(&mut self, mesh: &TerrainMesh) {
         if mesh.vertices.is_empty() {
             self.vertex_buffer = None;
             self.wireframe_index_buffer = None;
@@ -608,6 +647,7 @@ impl Renderer {
                 ctx,
                 &mut self.camera,
                 &mut self.render_mode,
+                &mut self.color_scheme,
                 &mut self.lighting,
                 self.fps,
             );
@@ -615,6 +655,11 @@ impl Renderer {
                 self.camera = Camera::new();
             }
         });
+
+        // Regenerate mesh if color scheme changed
+        if self.color_scheme != self.prev_color_scheme {
+            self.regenerate_mesh();
+        }
 
         // Handle egui platform output (cursor changes, etc.)
         self.egui_state

@@ -6,6 +6,7 @@
 use bytemuck::{Pod, Zeroable};
 use glam::Vec3;
 
+use super::colors::{height_to_color, ColorScheme};
 use super::TerrainData;
 
 /// GPU vertex data with position and color.
@@ -81,31 +82,42 @@ pub struct TerrainMesh {
 }
 
 impl TerrainMesh {
-    /// Generate mesh with default smooth shading.
+    /// Generate mesh with default smooth shading and terrain color scheme.
     pub fn from_terrain(terrain: &TerrainData, height_scale: f32) -> Self {
-        Self::from_terrain_with_shading(terrain, height_scale, ShadingMode::Smooth)
+        Self::from_terrain_with_options(terrain, height_scale, ShadingMode::Smooth, ColorScheme::Terrain)
     }
 
-    /// Generate mesh from terrain data with specified shading mode.
+    /// Generate mesh with specified shading mode and default terrain color scheme.
+    pub fn from_terrain_with_shading(
+        terrain: &TerrainData,
+        height_scale: f32,
+        shading_mode: ShadingMode,
+    ) -> Self {
+        Self::from_terrain_with_options(terrain, height_scale, shading_mode, ColorScheme::Terrain)
+    }
+
+    /// Generate mesh from terrain data with all options.
     ///
     /// # Arguments
     ///
     /// * `terrain` - Source terrain height data
     /// * `height_scale` - Multiplier for height values (Y axis)
     /// * `shading_mode` - Flat or smooth shading for normals
+    /// * `color_scheme` - Color gradient scheme for height coloring
     ///
     /// # Returns
     ///
     /// A mesh with:
     /// - Vertices positioned in 3D space, centered at origin
-    /// - Height-based gradient coloring
+    /// - Height-based gradient coloring using the specified scheme
     /// - Surface normals for lighting
     /// - Index pairs for horizontal and vertical wireframe lines
     /// - Triangle indices for solid rendering
-    pub fn from_terrain_with_shading(
+    pub fn from_terrain_with_options(
         terrain: &TerrainData,
         height_scale: f32,
         shading_mode: ShadingMode,
+        color_scheme: ColorScheme,
     ) -> Self {
         let mut vertices = Vec::new();
         let mut indices = Vec::new();
@@ -141,7 +153,7 @@ impl TerrainMesh {
                 positions.push(Vec3::new(x as f32 - offset_x, y, z as f32 - offset_z));
 
                 let t = (h - min_h) / height_range;
-                colors.push(height_to_color(t));
+                colors.push(height_to_color(t, color_scheme));
             }
         }
 
@@ -273,35 +285,6 @@ fn calculate_flat_normals(terrain: &TerrainData, positions: &[Vec3]) -> Vec<Vec3
     normals
 }
 
-/// Convert normalized height (0.0-1.0) to terrain gradient color.
-///
-/// Gradient stops:
-/// - 0.0-0.3: Blue to cyan (water/low elevation)
-/// - 0.3-0.5: Cyan to green (lowlands)
-/// - 0.5-0.8: Green to brown (highlands)
-/// - 0.8-1.0: Brown to white (snow peaks)
-fn height_to_color(t: f32) -> [f32; 3] {
-    let t = t.clamp(0.0, 1.0);
-
-    if t < 0.3 {
-        // Blue to cyan (water/low)
-        let s = t / 0.3;
-        [0.0, s * 0.5, 0.8 + s * 0.2]
-    } else if t < 0.5 {
-        // Cyan to green
-        let s = (t - 0.3) / 0.2;
-        [s * 0.2, 0.5 + s * 0.3, 1.0 - s * 0.6]
-    } else if t < 0.8 {
-        // Green to brown
-        let s = (t - 0.5) / 0.3;
-        [0.2 + s * 0.4, 0.8 - s * 0.4, 0.4 - s * 0.3]
-    } else {
-        // Brown to white (snow)
-        let s = (t - 0.8) / 0.2;
-        [0.6 + s * 0.4, 0.4 + s * 0.6, 0.1 + s * 0.9]
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -355,10 +338,10 @@ mod tests {
 
     #[test]
     fn test_height_to_color_bounds() {
-        // Test gradient at key points
-        let low = height_to_color(0.0);
-        let mid = height_to_color(0.5);
-        let high = height_to_color(1.0);
+        // Test terrain color gradient at key points
+        let low = height_to_color(0.0, ColorScheme::Terrain);
+        let mid = height_to_color(0.5, ColorScheme::Terrain);
+        let high = height_to_color(1.0, ColorScheme::Terrain);
 
         // Low should be bluish
         assert!(low[2] > low[0]);

@@ -7,6 +7,7 @@ use winit::event::{ElementState, MouseButton, MouseScrollDelta};
 use winit::keyboard::KeyCode;
 
 use crate::renderer::camera::Camera;
+use crate::renderer::Projection;
 
 /// Sensitivity constants for input handling.
 pub struct InputConfig {
@@ -107,6 +108,18 @@ impl InputController {
             KeyCode::KeyR if pressed => {
                 // Reset camera to default
                 *camera = Camera::new();
+            }
+            KeyCode::KeyP if pressed => {
+                camera.projection = match camera.projection {
+                    Projection::Perspective => Projection::Orthographic,
+                    Projection::Orthographic => Projection::Perspective,
+                }
+            }
+            KeyCode::KeyI if pressed => {
+                camera.projection = match camera.projection {
+                    Projection::Perspective => Projection::Orthographic,
+                    Projection::Orthographic => Projection::Perspective,
+                }
             }
             _ => {}
         }

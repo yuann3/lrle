@@ -38,7 +38,7 @@ use winit::{
 
 use input::InputController;
 use renderer::Renderer;
-use terrain::{load_fdf, TerrainMesh};
+use terrain::{load_fdf, TerrainData};
 
 /// Command-line arguments for lrle
 #[derive(Parser, Debug)]
@@ -59,8 +59,10 @@ struct App {
     window: Option<Arc<Window>>,
     /// GPU renderer instance
     renderer: Option<Renderer>,
-    /// Pre-generated terrain mesh to upload to GPU
-    mesh: TerrainMesh,
+    /// Terrain data for mesh generation
+    terrain: TerrainData,
+    /// Height scale multiplier
+    height_scale: f32,
     /// Input controller for camera
     input: InputController,
 }
@@ -85,7 +87,7 @@ impl ApplicationHandler for App {
 
         match pollster::block_on(Renderer::new(window.clone())) {
             Ok(mut renderer) => {
-                renderer.upload_mesh(&self.mesh);
+                renderer.upload_terrain(&self.terrain, self.height_scale);
                 self.renderer = Some(renderer);
                 self.window = Some(window);
             }
@@ -206,20 +208,12 @@ fn main() -> Result<()> {
     let args = Args::parse();
 
     // Load terrain data from file
-    let terrain_data = load_fdf(&args.file)?;
+    let terrain = load_fdf(&args.file)?;
     log::info!(
         "Loaded terrain: {}x{}, height range: {:?}",
-        terrain_data.width,
-        terrain_data.height,
-        terrain_data.height_bounds()
-    );
-
-    // Generate mesh from terrain data
-    let mesh = TerrainMesh::from_terrain(&terrain_data, args.height_scale);
-    log::info!(
-        "Generated mesh: {} vertices, {} indices",
-        mesh.vertices.len(),
-        mesh.indices.len()
+        terrain.width,
+        terrain.height,
+        terrain.height_bounds()
     );
 
     // Create event loop and run application
@@ -229,7 +223,8 @@ fn main() -> Result<()> {
     let mut app = App {
         window: None,
         renderer: None,
-        mesh,
+        terrain,
+        height_scale: args.height_scale,
         input: InputController::new(),
     };
 

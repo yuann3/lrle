@@ -6,6 +6,8 @@ use egui::Context;
 
 use crate::renderer::camera::Camera;
 use crate::renderer::{LightingConfig, RenderMode};
+use crate::renderer::Projection;
+use crate::terrain::ColorScheme;
 
 /// UI state and rendering.
 pub struct Ui {
@@ -26,6 +28,7 @@ impl Ui {
         ctx: &Context,
         camera: &mut Camera,
         render_mode: &mut RenderMode,
+        color_scheme: &mut ColorScheme,
         lighting: &mut LightingConfig,
         fps: f32,
     ) -> UiResponse {
@@ -67,6 +70,33 @@ impl Ui {
                                     ui.selectable_value(render_mode, RenderMode::Both, "Both");
                                 });
                         });
+
+                        ui.horizontal(|ui| {
+                            ui.label("Colors:");
+                            egui::ComboBox::from_id_salt("color_scheme")
+                                .selected_text(match color_scheme {
+                                    ColorScheme::Terrain => "Terrain",
+                                    ColorScheme::Heatmap => "Heatmap",
+                                    ColorScheme::Monochrome => "Monochrome",
+                                })
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(
+                                        color_scheme,
+                                        ColorScheme::Terrain,
+                                        "Terrain",
+                                    );
+                                    ui.selectable_value(
+                                        color_scheme,
+                                        ColorScheme::Heatmap,
+                                        "Heatmap",
+                                    );
+                                    ui.selectable_value(
+                                        color_scheme,
+                                        ColorScheme::Monochrome,
+                                        "Monochrome",
+                                    );
+                                });
+                        });
                     });
 
                     ui.separator();
@@ -75,8 +105,11 @@ impl Ui {
                     if matches!(render_mode, RenderMode::Solid | RenderMode::Both) {
                         ui.collapsing("Lighting", |ui| {
                             // Light direction as azimuth/elevation
-                            let mut light_azimuth =
-                                lighting.direction.z.atan2(lighting.direction.x).to_degrees();
+                            let mut light_azimuth = lighting
+                                .direction
+                                .z
+                                .atan2(lighting.direction.x)
+                                .to_degrees();
                             let mut light_elevation = lighting.direction.y.asin().to_degrees();
 
                             ui.horizontal(|ui| {
@@ -134,6 +167,31 @@ impl Ui {
 
                     // Camera section
                     ui.collapsing("Camera", |ui| {
+                       ui.horizontal(|ui| {
+                           ui.label("Projection:");
+                           egui::ComboBox::from_id_salt("projection")
+                               .selected_text(match camera.projection {
+                                   Projection::Perspective => "Perspective",
+                                   Projection::Orthographic => "Orthographic",
+                               })
+                               .show_ui(ui, |ui| {
+                                   ui.selectable_value(
+                                       &mut camera.projection,
+                                       Projection::Perspective,
+                                       "Perspective",
+                                   );
+                                   ui.selectable_value(
+                                       &mut camera.projection,
+                                       Projection::Orthographic,
+                                       "Orthographic",
+                                   );
+                               });
+                       });
+
+                       if ui.button("Isometric View").clicked() {
+                           camera.set_isometric();
+                       }
+
                         ui.horizontal(|ui| {
                             ui.label("Distance:");
                             ui.add(
@@ -193,6 +251,8 @@ impl Ui {
                         ui.label("Scroll: Zoom");
                         ui.label("Shift+Drag: Pan");
                         ui.label("Middle Drag: Pan");
+                        ui.label("P: Toggle Projection");
+                        ui.label("I: Isometric View");
                         ui.label("R: Reset Camera");
                         ui.label("Tab: Toggle Panel");
                         ui.label("ESC: Quit");
