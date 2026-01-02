@@ -6,7 +6,7 @@
 use bytemuck::{Pod, Zeroable};
 use glam::Vec3;
 
-use super::colors::{height_to_color, ColorScheme};
+use super::colors::{height_to_color, height_to_color_custom, ColorScheme, GradientConfig};
 use super::TerrainData;
 
 /// GPU vertex data with position and color.
@@ -60,6 +60,7 @@ impl Vertex {
 
 /// Shading mode for normal calculation
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[allow(dead_code)] // Flat variant reserved for future UI toggle
 pub enum ShadingMode {
     /// Flat shading - normals from height gradient
     Flat,
@@ -82,18 +83,41 @@ pub struct TerrainMesh {
 }
 
 impl TerrainMesh {
-    /// Generate mesh with default smooth shading and terrain color scheme.
+    /// Generate mesh with default settings (smooth shading, terrain colors).
+    #[allow(dead_code)] // Used in tests and as public convenience API
     pub fn from_terrain(terrain: &TerrainData, height_scale: f32) -> Self {
-        Self::from_terrain_with_options(terrain, height_scale, ShadingMode::Smooth, ColorScheme::Terrain)
+        Self::from_terrain_with_options(
+            terrain,
+            height_scale,
+            ShadingMode::Smooth,
+            ColorScheme::Terrain,
+        )
     }
 
-    /// Generate mesh with specified shading mode and default terrain color scheme.
-    pub fn from_terrain_with_shading(
+    /// Generate mesh from terrain data with preset color scheme.
+    pub fn from_terrain_with_options(
         terrain: &TerrainData,
         height_scale: f32,
         shading_mode: ShadingMode,
+        color_scheme: ColorScheme,
     ) -> Self {
-        Self::from_terrain_with_options(terrain, height_scale, shading_mode, ColorScheme::Terrain)
+        Self::from_terrain_full(terrain, height_scale, shading_mode, color_scheme, None)
+    }
+
+    /// Generate mesh from terrain data with custom gradient.
+    pub fn from_terrain_with_gradient(
+        terrain: &TerrainData,
+        height_scale: f32,
+        shading_mode: ShadingMode,
+        gradient: &GradientConfig,
+    ) -> Self {
+        Self::from_terrain_full(
+            terrain,
+            height_scale,
+            shading_mode,
+            ColorScheme::Custom,
+            Some(gradient),
+        )
     }
 
     /// Generate mesh from terrain data with all options.
@@ -104,6 +128,7 @@ impl TerrainMesh {
     /// * `height_scale` - Multiplier for height values (Y axis)
     /// * `shading_mode` - Flat or smooth shading for normals
     /// * `color_scheme` - Color gradient scheme for height coloring
+    /// * `gradient` - Optional custom gradient (used when color_scheme is Custom)
     ///
     /// # Returns
     ///
@@ -113,11 +138,12 @@ impl TerrainMesh {
     /// - Surface normals for lighting
     /// - Index pairs for horizontal and vertical wireframe lines
     /// - Triangle indices for solid rendering
-    pub fn from_terrain_with_options(
+    fn from_terrain_full(
         terrain: &TerrainData,
         height_scale: f32,
         shading_mode: ShadingMode,
         color_scheme: ColorScheme,
+        gradient: Option<&GradientConfig>,
     ) -> Self {
         let mut vertices = Vec::new();
         let mut indices = Vec::new();
@@ -153,7 +179,12 @@ impl TerrainMesh {
                 positions.push(Vec3::new(x as f32 - offset_x, y, z as f32 - offset_z));
 
                 let t = (h - min_h) / height_range;
-                colors.push(height_to_color(t, color_scheme));
+                let color = if let Some(grad) = gradient {
+                    height_to_color_custom(t, grad)
+                } else {
+                    height_to_color(t, color_scheme)
+                };
+                colors.push(color);
             }
         }
 

@@ -9,7 +9,7 @@ pub mod colors;
 pub mod loader;
 pub mod mesh;
 
-pub use colors::ColorScheme;
+pub use colors::{ColorScheme, GradientConfig};
 pub use loader::load_fdf;
 pub use mesh::{TerrainMesh, Vertex};
 
@@ -28,7 +28,9 @@ pub struct TerrainData {
     pub height: usize,
     /// 2D grid of height values, indexed as `points[z][x]`
     pub points: Vec<Vec<f32>>,
-    /// Optional per-vertex colors as RGB values (0xRRGGBB)
+    /// Optional per-vertex colors as RGB values (0xRRGGBB).
+    /// Parsed from FDF files but not yet used in mesh generation.
+    #[allow(dead_code)] // Reserved for future per-vertex color support
     pub colors: Option<Vec<Vec<u32>>>,
 }
 

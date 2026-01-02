@@ -12,6 +12,54 @@ pub enum ColorScheme {
     Heatmap,
     /// Single color with intensity based on height
     Monochrome,
+    /// User-defined gradient with low, mid, high colors
+    Custom,
+}
+
+/// Custom gradient configuration with three color stops.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GradientConfig {
+    /// Color at height = 0.0
+    pub low: [f32; 3],
+    /// Color at height = 0.5
+    pub mid: [f32; 3],
+    /// Color at height = 1.0
+    pub high: [f32; 3],
+}
+
+impl Default for GradientConfig {
+    fn default() -> Self {
+        Self {
+            low: [0.0, 0.3, 0.8],  // Blue
+            mid: [0.2, 0.7, 0.3],  // Green
+            high: [1.0, 1.0, 1.0], // White
+        }
+    }
+}
+
+impl GradientConfig {
+    /// Interpolate color at position t (0.0 to 1.0)
+    pub fn interpolate(&self, t: f32) -> [f32; 3] {
+        let t = t.clamp(0.0, 1.0);
+        if t < 0.5 {
+            // Interpolate between low and mid
+            let s = t * 2.0;
+            lerp_color(self.low, self.mid, s)
+        } else {
+            // Interpolate between mid and high
+            let s = (t - 0.5) * 2.0;
+            lerp_color(self.mid, self.high, s)
+        }
+    }
+}
+
+/// Linear interpolation between two colors
+fn lerp_color(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
+    [
+        a[0] + (b[0] - a[0]) * t,
+        a[1] + (b[1] - a[1]) * t,
+        a[2] + (b[2] - a[2]) * t,
+    ]
 }
 
 /// Convert normalized height (0.0-1.0) to RGB color based on scheme.
@@ -21,7 +69,13 @@ pub fn height_to_color(t: f32, scheme: ColorScheme) -> [f32; 3] {
         ColorScheme::Terrain => terrain_color(t),
         ColorScheme::Heatmap => heatmap_color(t),
         ColorScheme::Monochrome => monochrome_color(t),
+        ColorScheme::Custom => GradientConfig::default().interpolate(t),
     }
+}
+
+/// Convert height to color using a custom gradient config.
+pub fn height_to_color_custom(t: f32, gradient: &GradientConfig) -> [f32; 3] {
+    gradient.interpolate(t.clamp(0.0, 1.0))
 }
 
 /// Natural terrain gradient: blue → cyan → green → brown → white

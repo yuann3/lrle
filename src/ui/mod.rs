@@ -5,9 +5,9 @@
 use egui::Context;
 
 use crate::renderer::camera::Camera;
-use crate::renderer::{LightingConfig, RenderMode};
+use crate::renderer::{ContourConfig, LightingConfig, RenderMode};
 use crate::renderer::Projection;
-use crate::terrain::ColorScheme;
+use crate::terrain::{ColorScheme, GradientConfig};
 
 /// UI state and rendering.
 pub struct Ui {
@@ -29,7 +29,10 @@ impl Ui {
         camera: &mut Camera,
         render_mode: &mut RenderMode,
         color_scheme: &mut ColorScheme,
+        gradient: &mut GradientConfig,
         lighting: &mut LightingConfig,
+        contour: &mut ContourConfig,
+        height_scale: &mut f32,
         fps: f32,
     ) -> UiResponse {
         let mut response = UiResponse::default();
@@ -78,6 +81,7 @@ impl Ui {
                                     ColorScheme::Terrain => "Terrain",
                                     ColorScheme::Heatmap => "Heatmap",
                                     ColorScheme::Monochrome => "Monochrome",
+                                    ColorScheme::Custom => "Custom",
                                 })
                                 .show_ui(ui, |ui| {
                                     ui.selectable_value(
@@ -95,7 +99,37 @@ impl Ui {
                                         ColorScheme::Monochrome,
                                         "Monochrome",
                                     );
+                                    ui.selectable_value(
+                                        color_scheme,
+                                        ColorScheme::Custom,
+                                        "Custom",
+                                    );
                                 });
+                        });
+
+                        // Custom gradient editor (shown when Custom is selected)
+                        if *color_scheme == ColorScheme::Custom {
+                            ui.horizontal(|ui| {
+                                ui.label("Low:");
+                                color_edit(ui, &mut gradient.low);
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("Mid:");
+                                color_edit(ui, &mut gradient.mid);
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("High:");
+                                color_edit(ui, &mut gradient.high);
+                            });
+                        }
+
+                        ui.horizontal(|ui| {
+                            ui.label("Height:");
+                            ui.add(
+                                egui::Slider::new(height_scale, 0.1..=10.0)
+                                    .logarithmic(true)
+                                    .show_value(true),
+                            );
                         });
                     });
 
@@ -159,6 +193,30 @@ impl Ui {
 
                             if ui.button("Reset Lighting").clicked() {
                                 *lighting = LightingConfig::default();
+                            }
+                        });
+
+                        // Contour section
+                        ui.collapsing("Contours", |ui| {
+                            ui.checkbox(&mut contour.enabled, "Show Contours");
+
+                            if contour.enabled {
+                                ui.horizontal(|ui| {
+                                    ui.label("Interval:");
+                                    ui.add(
+                                        egui::Slider::new(&mut contour.interval, 0.5..=20.0)
+                                            .logarithmic(true)
+                                            .show_value(true),
+                                    );
+                                });
+
+                                ui.horizontal(|ui| {
+                                    ui.label("Width:");
+                                    ui.add(
+                                        egui::Slider::new(&mut contour.width, 0.05..=1.0)
+                                            .show_value(true),
+                                    );
+                                });
                             }
                         });
 
@@ -273,6 +331,20 @@ fn update_light_direction(lighting: &mut LightingConfig, azimuth_deg: f32, eleva
         elevation.cos() * azimuth.sin(),
     )
     .normalize();
+}
+
+/// Simple color editor widget for [f32; 3] RGB values
+fn color_edit(ui: &mut egui::Ui, color: &mut [f32; 3]) {
+    let mut rgba = egui::Color32::from_rgb(
+        (color[0] * 255.0) as u8,
+        (color[1] * 255.0) as u8,
+        (color[2] * 255.0) as u8,
+    );
+    if ui.color_edit_button_srgba(&mut rgba).changed() {
+        color[0] = rgba.r() as f32 / 255.0;
+        color[1] = rgba.g() as f32 / 255.0;
+        color[2] = rgba.b() as f32 / 255.0;
+    }
 }
 
 impl Default for Ui {

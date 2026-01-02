@@ -15,7 +15,7 @@ use glam::{Mat4, Vec3};
 use wgpu::util::DeviceExt;
 use winit::window::Window;
 
-use crate::terrain::{ColorScheme, TerrainMesh, Vertex};
+use crate::terrain::{ColorScheme, GradientConfig, TerrainMesh, Vertex};
 use crate::ui::Ui;
 use camera::Camera;
 pub use camera::Projection;
@@ -54,6 +54,30 @@ impl Default for LightingConfig {
     }
 }
 
+/// Contour line configuration.
+#[derive(Debug, Clone, Copy)]
+pub struct ContourConfig {
+    /// Whether contour lines are enabled
+    pub enabled: bool,
+    /// Height interval between contour lines
+    pub interval: f32,
+    /// Line width in world units
+    pub width: f32,
+    /// Contour line color
+    pub color: Vec3,
+}
+
+impl Default for ContourConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interval: 5.0,
+            width: 0.15,
+            color: Vec3::new(0.0, 0.0, 0.0), // Black lines
+        }
+    }
+}
+
 /// Uniform data sent to shaders (wireframe - simple).
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
@@ -75,7 +99,7 @@ impl WireframeUniforms {
     }
 }
 
-/// Uniform data for solid shaded rendering with lighting.
+/// Uniform data for solid shaded rendering with lighting and contours.
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct SolidUniforms {
@@ -84,6 +108,12 @@ struct SolidUniforms {
     _pad0: f32,
     light_color: [f32; 3],
     ambient: f32,
+    // Contour parameters
+    contour_color: [f32; 3],
+    contour_interval: f32,
+    contour_width: f32,
+    contour_enabled: f32, // 1.0 = enabled, 0.0 = disabled
+    _pad1: [f32; 2],
 }
 
 impl SolidUniforms {
@@ -94,16 +124,31 @@ impl SolidUniforms {
             _pad0: 0.0,
             light_color: [1.0, 1.0, 1.0],
             ambient: 0.3,
+            contour_color: [0.0, 0.0, 0.0],
+            contour_interval: 5.0,
+            contour_width: 0.15,
+            contour_enabled: 0.0,
+            _pad1: [0.0, 0.0],
         }
     }
 
-    fn update(&mut self, camera: &Camera, aspect: f32, lighting: &LightingConfig) {
+    fn update(
+        &mut self,
+        camera: &Camera,
+        aspect: f32,
+        lighting: &LightingConfig,
+        contour: &ContourConfig,
+    ) {
         self.view_proj = camera
             .build_view_projection_matrix(aspect)
             .to_cols_array_2d();
         self.light_dir = lighting.direction.to_array();
         self.light_color = lighting.color.to_array();
         self.ambient = lighting.ambient;
+        self.contour_color = contour.color.to_array();
+        self.contour_interval = contour.interval;
+        self.contour_width = contour.width;
+        self.contour_enabled = if contour.enabled { 1.0 } else { 0.0 };
     }
 }
 
@@ -147,8 +192,14 @@ pub struct Renderer {
     /// Lighting configuration
     pub lighting: LightingConfig,
 
+    /// Contour line configuration
+    pub contour: ContourConfig,
+
     /// Color scheme for terrain
     pub color_scheme: ColorScheme,
+
+    /// Custom gradient for terrain coloring
+    pub gradient: GradientConfig,
 
     /// Orbital camera for viewing the terrain
     pub camera: Camera,
@@ -171,6 +222,10 @@ pub struct Renderer {
     height_scale: f32,
     /// Previous color scheme to detect changes
     prev_color_scheme: ColorScheme,
+    /// Previous gradient to detect changes
+    prev_gradient: GradientConfig,
+    /// Previous height scale to detect changes
+    prev_height_scale: f32,
 }
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
@@ -489,7 +544,9 @@ impl Renderer {
             num_triangle_indices: 0,
             render_mode: RenderMode::default(),
             lighting: LightingConfig::default(),
+            contour: ContourConfig::default(),
             color_scheme: ColorScheme::default(),
+            gradient: GradientConfig::default(),
             camera,
             egui_state,
             egui_renderer,
@@ -500,6 +557,8 @@ impl Renderer {
             terrain_data: None,
             height_scale: 1.0,
             prev_color_scheme: ColorScheme::default(),
+            prev_gradient: GradientConfig::default(),
+            prev_height_scale: 1.0,
         })
     }
 
@@ -540,17 +599,28 @@ impl Renderer {
         self.regenerate_mesh();
     }
 
-    /// Regenerate mesh from stored terrain data with current color scheme.
+    /// Regenerate mesh from stored terrain data with current settings.
     fn regenerate_mesh(&mut self) {
         if let Some(ref terrain) = self.terrain_data {
-            let mesh = TerrainMesh::from_terrain_with_options(
-                terrain,
-                self.height_scale,
-                crate::terrain::mesh::ShadingMode::Smooth,
-                self.color_scheme,
-            );
+            let mesh = if self.color_scheme == ColorScheme::Custom {
+                TerrainMesh::from_terrain_with_gradient(
+                    terrain,
+                    self.height_scale,
+                    crate::terrain::mesh::ShadingMode::Smooth,
+                    &self.gradient,
+                )
+            } else {
+                TerrainMesh::from_terrain_with_options(
+                    terrain,
+                    self.height_scale,
+                    crate::terrain::mesh::ShadingMode::Smooth,
+                    self.color_scheme,
+                )
+            };
             self.upload_mesh_buffers(&mesh);
             self.prev_color_scheme = self.color_scheme;
+            self.prev_gradient = self.gradient;
+            self.prev_height_scale = self.height_scale;
         }
     }
 
@@ -632,7 +702,7 @@ impl Renderer {
 
         // Update solid uniforms
         let mut solid_uniforms = SolidUniforms::new();
-        solid_uniforms.update(&self.camera, aspect, &self.lighting);
+        solid_uniforms.update(&self.camera, aspect, &self.lighting, &self.contour);
         self.queue.write_buffer(
             &self.solid_uniform_buffer,
             0,
@@ -648,7 +718,10 @@ impl Renderer {
                 &mut self.camera,
                 &mut self.render_mode,
                 &mut self.color_scheme,
+                &mut self.gradient,
                 &mut self.lighting,
+                &mut self.contour,
+                &mut self.height_scale,
                 self.fps,
             );
             if response.reset_camera {
@@ -656,8 +729,11 @@ impl Renderer {
             }
         });
 
-        // Regenerate mesh if color scheme changed
-        if self.color_scheme != self.prev_color_scheme {
+        // Regenerate mesh if color scheme, gradient, or height scale changed
+        if self.color_scheme != self.prev_color_scheme
+            || self.gradient != self.prev_gradient
+            || (self.height_scale - self.prev_height_scale).abs() > f32::EPSILON
+        {
             self.regenerate_mesh();
         }
 
